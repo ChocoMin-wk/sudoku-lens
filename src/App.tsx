@@ -15,28 +15,24 @@ import {
   type Digit,
 } from "./domain/sudoku";
 import { recognizeSudoku, type RecognitionResult } from "./imaging/recognizer";
+import { loadSavedGame, saveGame, type SavedGame } from "./storage/gameStorage";
 import "./styles.css";
 
-const STORAGE_KEY = "sudoku-lens:game:v1";
-
-type SavedGame = {
-  board: Board;
-  solution: number[] | null;
-  startedAt: number;
-};
-
-function loadGame(): SavedGame {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null") as SavedGame | null;
-    if (saved?.board?.length === 81) return saved;
-  } catch {
-    // 壊れた端末内データは例題で置き換える。
-  }
+function createInitialGame(): SavedGame {
+  const saved = loadSavedGame();
+  if (saved) return saved;
   const board = boardFromString(SAMPLE_PUZZLE);
   return {
     board,
     solution: analyzePuzzle(valuesOf(board)).solution,
     startedAt: Date.now(),
+    selected: board.findIndex((cell) => !cell.given),
+    noteMode: false,
+    undoStack: [],
+    redoStack: [],
+    message: "マスを選び、数字を入力してください",
+    wrongIndexes: [],
+    updatedAt: Date.now(),
   };
 }
 
@@ -258,19 +254,18 @@ function ScanDialog({
 }
 
 export default function App() {
-  const initial = useMemo(() => loadGame(), []);
+  const initial = useMemo(() => createInitialGame(), []);
   const [board, setBoard] = useState<Board>(initial.board);
   const [solution, setSolution] = useState<number[] | null>(initial.solution);
   const [startedAt, setStartedAt] = useState(initial.startedAt);
-  const [selected, setSelected] = useState<number | null>(() => {
-    const firstEmpty = initial.board.findIndex((cell) => !cell.given);
-    return firstEmpty >= 0 ? firstEmpty : null;
-  });
-  const [noteMode, setNoteMode] = useState(false);
-  const [undoStack, setUndoStack] = useState<Board[]>([]);
-  const [redoStack, setRedoStack] = useState<Board[]>([]);
-  const [message, setMessage] = useState("マスを選び、数字を入力してください");
-  const [wrongIndexes, setWrongIndexes] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<number | null>(initial.selected);
+  const [noteMode, setNoteMode] = useState(initial.noteMode);
+  const [undoStack, setUndoStack] = useState<Board[]>(initial.undoStack);
+  const [redoStack, setRedoStack] = useState<Board[]>(initial.redoStack);
+  const [message, setMessage] = useState(initial.message);
+  const [wrongIndexes, setWrongIndexes] = useState<Set<number>>(
+    () => new Set(initial.wrongIndexes),
+  );
   const [showScanner, setShowScanner] = useState(false);
   const [elapsed, setElapsed] = useState(() => Math.floor((Date.now() - initial.startedAt) / 1000));
 
@@ -282,9 +277,39 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [startedAt]);
 
+  const persistGame = useCallback(() => {
+    saveGame({
+      board,
+      solution,
+      startedAt,
+      selected,
+      noteMode,
+      undoStack,
+      redoStack,
+      message,
+      wrongIndexes: [...wrongIndexes],
+      updatedAt: Date.now(),
+    });
+  }, [
+    board,
+    message,
+    noteMode,
+    redoStack,
+    selected,
+    solution,
+    startedAt,
+    undoStack,
+    wrongIndexes,
+  ]);
+
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ board, solution, startedAt } satisfies SavedGame));
-  }, [board, solution, startedAt]);
+    persistGame();
+  }, [persistGame]);
+
+  useEffect(() => {
+    window.addEventListener("pagehide", persistGame);
+    return () => window.removeEventListener("pagehide", persistGame);
+  }, [persistGame]);
 
   useEffect(() => {
     if ("serviceWorker" in navigator && import.meta.env.PROD) {
@@ -518,7 +543,7 @@ export default function App() {
 
       <footer>
         <p>盤面と写真はこの端末内だけで処理されます。</p>
-        <p>自動保存済み</p>
+        <p>Cookieと端末内に自動保存済み</p>
       </footer>
 
       {showScanner && (

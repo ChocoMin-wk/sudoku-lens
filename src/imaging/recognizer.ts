@@ -25,12 +25,17 @@ type Component = {
   maxY: number;
 };
 
-type GlyphCell = {
-  index: number;
+type GlyphVariant = {
   canvas: HTMLCanvasElement;
   geometryConfidence: number;
   heightRatio: number;
   centerOffset: number;
+  quality: number;
+};
+
+type GlyphCell = GlyphVariant & {
+  index: number;
+  alternatives: GlyphVariant[];
 };
 
 const BOARD_SIZE = 900;
@@ -323,10 +328,7 @@ function otsuThreshold(values: Uint8Array) {
       threshold = value;
     }
   }
-  // Printed clues are the darkest part of a photographed page. Capping the
-  // threshold prevents broad phone/camera shadows from joining a digit to the
-  // cell edge and swallowing the whole connected component.
-  return Math.min(110, Math.max(55, threshold));
+  return Math.min(220, Math.max(45, threshold));
 }
 
 function connectedComponents(binary: Uint8Array, width: number, height: number) {
@@ -436,6 +438,105 @@ function createGlyphCanvas(
   return glyph;
 }
 
+function binaryAtThreshold(values: Uint8Array, threshold: number) {
+  const binary = new Uint8Array(values.length);
+  for (let index = 0; index < values.length; index += 1) {
+    binary[index] = values[index] < threshold ? 1 : 0;
+  }
+  return binary;
+}
+
+function adaptiveCellBinary(values: Uint8Array, width: number, height: number) {
+  const stride = width + 1;
+  const integral = new Uint32Array((width + 1) * (height + 1));
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      rowSum += values[y * width + x];
+      integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + rowSum;
+    }
+  }
+
+  const radius = Math.max(8, Math.round(Math.min(width, height) * 0.2));
+  const binary = new Uint8Array(values.length);
+  for (let y = 0; y < height; y += 1) {
+    const top = Math.max(0, y - radius);
+    const bottom = Math.min(height - 1, y + radius);
+    for (let x = 0; x < width; x += 1) {
+      const left = Math.max(0, x - radius);
+      const right = Math.min(width - 1, x + radius);
+      const sum =
+        integral[(bottom + 1) * stride + right + 1] -
+        integral[top * stride + right + 1] -
+        integral[(bottom + 1) * stride + left] +
+        integral[top * stride + left];
+      const area = (right - left + 1) * (bottom - top + 1);
+      binary[y * width + x] = values[y * width + x] < sum / area - 10 ? 1 : 0;
+    }
+  }
+  return binary;
+}
+
+function analyzeCellBinary(binary: Uint8Array, width: number, height: number) {
+  const minimumArea = Math.max(10, Math.round(binary.length * 0.002));
+  const components = connectedComponents(binary, width, height)
+    .filter((component) => {
+      const componentWidth = component.maxX - component.minX + 1;
+      const componentHeight = component.maxY - component.minY + 1;
+      const looksLikeHorizontalLine =
+        componentWidth > width * 0.72 && componentHeight < height * 0.16;
+      const looksLikeVerticalLine =
+        componentHeight > height * 0.72 && componentWidth < width * 0.16;
+      const coversMostOfCell = component.area > binary.length * 0.42;
+      return (
+        !looksLikeHorizontalLine &&
+        !looksLikeVerticalLine &&
+        !coversMostOfCell &&
+        component.area >= minimumArea
+      );
+    })
+    .sort((a, b) => b.area - a.area);
+
+  if (!components.length) return { kind: "blank" as const };
+
+  // Sudoku digits are single connected shapes in the supported printed fonts.
+  // Keeping the dominant component prevents distant shadow/noise fragments from
+  // expanding the glyph bounds and shifting it away from the cell centre.
+  const kept = [components[0]];
+  const bounds = components[0];
+  const contentWidth = bounds.maxX - bounds.minX + 1;
+  const contentHeight = bounds.maxY - bounds.minY + 1;
+  const widthRatio = contentWidth / width;
+  const heightRatio = contentHeight / height;
+  const areaRatio = bounds.area / binary.length;
+  const centerX = (bounds.minX + bounds.maxX + 1) / 2 / width;
+  const centerY = (bounds.minY + bounds.maxY + 1) / 2 / height;
+  const centerOffset = Math.hypot(centerX - 0.5, centerY - 0.5);
+  const likelyAnnotation =
+    heightRatio < 0.2 ||
+    (heightRatio < 0.44 && centerOffset > 0.29) ||
+    (heightRatio < 0.34 && widthRatio < 0.34);
+
+  if (likelyAnnotation) return { kind: "annotation" as const };
+  if (heightRatio < 0.25 || areaRatio < 0.006) return { kind: "blank" as const };
+
+  const heightScore = 1 - Math.min(1, Math.abs(heightRatio - 0.62) / 0.5);
+  const centerScore = 1 - Math.min(1, centerOffset / 0.42);
+  const areaScore = 1 - Math.min(1, Math.abs(areaRatio - 0.09) / 0.2);
+  const quality = heightScore * 0.42 + centerScore * 0.43 + areaScore * 0.15;
+
+  return {
+    kind: "digit" as const,
+    variant: {
+      canvas: createGlyphCanvas(binary, width, height, kept, bounds),
+      geometryConfidence: Math.min(0.98, Math.max(0.62, 0.6 + quality * 0.38)),
+      heightRatio,
+      centerOffset,
+      quality,
+    } satisfies GlyphVariant,
+  };
+}
+
 function preprocessCell(
   gray: Uint8Array,
   boardWidth: number,
@@ -444,8 +545,8 @@ function preprocessCell(
   x1: number,
   y1: number,
 ) {
-  const insetX = Math.max(6, Math.round((x1 - x0) * 0.1));
-  const insetY = Math.max(6, Math.round((y1 - y0) * 0.1));
+  const insetX = Math.max(5, Math.round((x1 - x0) * 0.08));
+  const insetY = Math.max(5, Math.round((y1 - y0) * 0.08));
   const left = x0 + insetX;
   const top = y0 + insetY;
   const width = Math.max(1, x1 - x0 - insetX * 2);
@@ -458,64 +559,29 @@ function preprocessCell(
     }
   }
 
-  const threshold = otsuThreshold(crop);
-  const binary = new Uint8Array(crop.length);
-  for (let index = 0; index < crop.length; index += 1) {
-    binary[index] = crop[index] < threshold ? 1 : 0;
+  const otsu = otsuThreshold(crop);
+  const binaries = [
+    binaryAtThreshold(crop, Math.min(110, otsu)),
+    binaryAtThreshold(crop, otsu),
+    adaptiveCellBinary(crop, width, height),
+  ];
+  const analyzed = binaries.map((binary) => analyzeCellBinary(binary, width, height));
+  const variants = analyzed
+    .flatMap((result) => (result.kind === "digit" ? [result.variant] : []))
+    .sort((a, b) => b.quality - a.quality)
+    .slice(0, 3);
+
+  if (variants.length) {
+    return {
+      kind: "digit" as const,
+      primary: variants[0],
+      alternatives: variants.slice(1),
+    };
   }
-
-  const minimumArea = Math.max(10, Math.round(crop.length * 0.002));
-  const components = connectedComponents(binary, width, height)
-    .filter((component) => {
-      const componentWidth = component.maxX - component.minX + 1;
-      const componentHeight = component.maxY - component.minY + 1;
-      const looksLikeHorizontalLine =
-        componentWidth > width * 0.72 && componentHeight < height * 0.16;
-      const looksLikeVerticalLine =
-        componentHeight > height * 0.72 && componentWidth < width * 0.16;
-      const coversMostOfCell = component.area > crop.length * 0.55;
-      return (
-        !looksLikeHorizontalLine &&
-        !looksLikeVerticalLine &&
-        !coversMostOfCell &&
-        component.area >= minimumArea
-      );
-    })
-    .sort((a, b) => b.area - a.area);
-
-  if (!components.length) return { kind: "blank" as const };
-
-  const largestArea = components[0].area;
-  const kept = components.filter((component) => component.area >= largestArea * 0.08);
-  const bounds = kept.reduce(
-    (current, component) => ({
-      minX: Math.min(current.minX, component.minX),
-      minY: Math.min(current.minY, component.minY),
-      maxX: Math.max(current.maxX, component.maxX),
-      maxY: Math.max(current.maxY, component.maxY),
-    }),
-    { minX: width, minY: height, maxX: 0, maxY: 0 },
-  );
-
-  const contentHeight = bounds.maxY - bounds.minY + 1;
-  const heightRatio = contentHeight / height;
-  const centerX = (bounds.minX + bounds.maxX + 1) / 2 / width;
-  const centerY = (bounds.minY + bounds.maxY + 1) / 2 / height;
-  const centerOffset = Math.hypot(centerX - 0.5, centerY - 0.5);
-  // Printed annotations sit near a cell corner and are much smaller than clues.
-  // Width alone is deliberately not used because a printed 1 can be very narrow.
-  const likelyAnnotation =
-    heightRatio < 0.2 || (heightRatio < 0.42 && centerOffset > 0.33);
-
-  if (likelyAnnotation) return { kind: "annotation" as const };
-
-  return {
-    kind: "digit" as const,
-    canvas: createGlyphCanvas(binary, width, height, kept, bounds),
-    geometryConfidence: Math.min(1, Math.max(0.68, 0.62 + heightRatio * 0.5)),
-    heightRatio,
-    centerOffset,
-  };
+  if (analyzed.some((result) => result.kind === "annotation")) {
+    return { kind: "annotation" as const };
+  }
+  return { kind: "blank" as const };
 }
 
 function extractGlyphCells(board: HTMLCanvasElement) {
@@ -541,10 +607,8 @@ function extractGlyphCells(board: HTMLCanvasElement) {
       } else if (processed.kind === "digit") {
         glyphs.push({
           index: row * 9 + column,
-          canvas: processed.canvas,
-          geometryConfidence: processed.geometryConfidence,
-          heightRatio: processed.heightRatio,
-          centerOffset: processed.centerOffset,
+          ...processed.primary,
+          alternatives: processed.alternatives,
         });
       }
     }
@@ -553,9 +617,88 @@ function extractGlyphCells(board: HTMLCanvasElement) {
   return { glyphs, ignoredAnnotations };
 }
 
+function createSparseOcrCanvas(board: HTMLCanvasElement) {
+  const gray = grayscaleOf(board);
+  const binary = adaptiveBinary(gray, board.width, board.height);
+  const verticalLines = detectGridLines(binary, board.width, board.height, "x");
+  const horizontalLines = detectGridLines(binary, board.width, board.height, "y");
+  const output = document.createElement("canvas");
+  output.width = board.width;
+  output.height = board.height;
+  const context = output.getContext("2d");
+  if (!context) throw new Error("盤面OCR画像を作成できませんでした。");
+  const image = context.createImageData(board.width, board.height);
+  image.data.fill(255);
+
+  const nearLine = (coordinate: number, lines: number[]) =>
+    lines.some((line) => Math.abs(coordinate - line) <= 6);
+  for (let y = 0; y < board.height; y += 1) {
+    if (nearLine(y, horizontalLines)) continue;
+    for (let x = 0; x < board.width; x += 1) {
+      if (!binary[y * board.width + x] || nearLine(x, verticalLines)) continue;
+      const offset = (y * board.width + x) * 4;
+      image.data[offset] = 0;
+      image.data[offset + 1] = 0;
+      image.data[offset + 2] = 0;
+      image.data[offset + 3] = 255;
+    }
+  }
+  context.putImageData(image, 0, 0);
+  return output;
+}
+
+function collectSparsePredictions(
+  result: Awaited<ReturnType<Awaited<ReturnType<typeof createWorker>>["recognize"]>>,
+  width: number,
+  height: number,
+) {
+  const predictions: CellPrediction[] = [];
+  const words =
+    result.data.blocks?.flatMap((block) =>
+      block.paragraphs.flatMap((paragraph) =>
+        paragraph.lines.flatMap((line) => line.words),
+      ),
+    ) ?? [];
+
+  for (const word of words) {
+    const digit = Number(word.text.replace(/[^1-9]/g, "")[0]);
+    if (!digit || word.confidence < 55) continue;
+    const boxWidth = word.bbox.x1 - word.bbox.x0;
+    const boxHeight = word.bbox.y1 - word.bbox.y0;
+    // Printed clues occupy roughly half a cell. This removes small A/B labels
+    // even when a digits-only OCR pass tries to coerce them into a number.
+    if (boxHeight < height / 24 || boxWidth > width / 7) continue;
+    const centerX = (word.bbox.x0 + word.bbox.x1) / 2;
+    const centerY = (word.bbox.y0 + word.bbox.y1) / 2;
+    const column = Math.max(0, Math.min(8, Math.floor((centerX / width) * 9)));
+    const row = Math.max(0, Math.min(8, Math.floor((centerY / height) * 9)));
+    predictions.push({
+      index: row * 9 + column,
+      candidates: [{
+        digit,
+        confidence: Math.max(0.4, Math.min(0.68, (word.confidence / 100) * 0.72)),
+      }],
+    });
+  }
+  return predictions;
+}
+
+function mergePredictions(target: CellPrediction[], additions: CellPrediction[]) {
+  const byIndex = new Map(target.map((prediction) => [prediction.index, prediction]));
+  for (const addition of additions) {
+    const existing = byIndex.get(addition.index);
+    if (existing) {
+      existing.candidates = mergeCandidates(existing.candidates, addition.candidates);
+    } else {
+      target.push(addition);
+      byIndex.set(addition.index, addition);
+    }
+  }
+}
+
 function collectCandidates(
   result: Awaited<ReturnType<Awaited<ReturnType<typeof createWorker>>["recognize"]>>,
-  glyph: GlyphCell,
+  glyph: GlyphVariant,
 ) {
   const candidates = new Map<number, number>();
   const text = result.data.text.trim().toUpperCase().replace(/[^A-Z1-9]/g, "");
@@ -620,6 +763,21 @@ function collectCandidates(
     .sort((a, b) => b.confidence - a.confidence),
     annotation: false,
   };
+}
+
+function mergeCandidates(...groups: OcrCandidate[][]) {
+  const merged = new Map<number, number>();
+  for (const group of groups) {
+    for (const candidate of group) {
+      merged.set(
+        candidate.digit,
+        Math.max(merged.get(candidate.digit) ?? 0, candidate.confidence),
+      );
+    }
+  }
+  return [...merged.entries()]
+    .map(([digit, confidence]) => ({ digit, confidence }))
+    .sort((a, b) => b.confidence - a.confidence);
 }
 
 function glyphInk(canvas: HTMLCanvasElement) {
@@ -761,7 +919,28 @@ export async function recognizeSudoku(
         {},
         { blocks: true, text: true },
       );
-      const reading = collectCandidates(result, glyph);
+      let reading = collectCandidates(result, glyph);
+      if (!reading.annotation && (reading.candidates[0]?.confidence ?? 0) < 0.72) {
+        for (const alternative of glyph.alternatives) {
+          const alternativeResult = await worker.recognize(
+            alternative.canvas,
+            {},
+            { blocks: true, text: true },
+          );
+          const alternativeReading = collectCandidates(alternativeResult, alternative);
+          reading = {
+            annotation: reading.annotation && alternativeReading.annotation,
+            candidates: mergeCandidates(
+              reading.candidates,
+              alternativeReading.candidates.map((candidate) => ({
+                ...candidate,
+                confidence: candidate.confidence * 0.96,
+              })),
+            ),
+          };
+          if ((reading.candidates[0]?.confidence ?? 0) >= 0.72) break;
+        }
+      }
       if (reading.annotation) ignoredAnnotations += 1;
       if (reading.candidates.length) {
         predictions.push({ index: glyph.index, candidates: reading.candidates });
@@ -790,7 +969,26 @@ export async function recognizeSudoku(
           {},
           { blocks: true, text: true },
         );
-        const retryReading = collectCandidates(retryResult, glyph);
+        let retryReading = collectCandidates(retryResult, glyph);
+        for (const alternative of glyph.alternatives) {
+          if ((retryReading.candidates[0]?.confidence ?? 0) >= 0.62) break;
+          const alternativeResult = await worker.recognize(
+            alternative.canvas,
+            {},
+            { blocks: true, text: true },
+          );
+          const alternativeReading = collectCandidates(alternativeResult, alternative);
+          retryReading = {
+            annotation: false,
+            candidates: mergeCandidates(
+              retryReading.candidates,
+              alternativeReading.candidates.map((candidate) => ({
+                ...candidate,
+                confidence: candidate.confidence * 0.94,
+              })),
+            ),
+          };
+        }
         if (retryReading.candidates.length) {
           predictions.push({
             index: glyph.index,
@@ -809,7 +1007,23 @@ export async function recognizeSudoku(
       inferFromRecognizedGlyphs(stillUnresolved, glyphs, predictions);
     }
 
-    onProgress(0.95, "数独ルールで認識結果を確認しています");
+    onProgress(0.94, "盤面全体から数字を再確認しています");
+    await worker.setParameters({
+      tessedit_char_whitelist: "123456789",
+      tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+    });
+    const sparseCanvas = createSparseOcrCanvas(normalized);
+    const sparseResult = await worker.recognize(
+      sparseCanvas,
+      {},
+      { blocks: true, text: true },
+    );
+    mergePredictions(
+      predictions,
+      collectSparsePredictions(sparseResult, sparseCanvas.width, sparseCanvas.height),
+    );
+
+    onProgress(0.97, "数独ルールで認識結果を確認しています");
     const reconciled = reconcileWithSudoku(predictions);
     onProgress(
       1,

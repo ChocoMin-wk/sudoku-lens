@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { SAMPLE_PUZZLE } from "../domain/sudoku";
 import { reconcileWithSudoku, type CellPrediction } from "./ocrPostprocess";
 
+const SHADOWED_PHOTO_PUZZLE = [
+  "670030000",
+  "002100500",
+  "008000670",
+  "010080037",
+  "006000000",
+  "000040020",
+  "000609002",
+  "000003080",
+  "000500000",
+].join("");
+
 function predictionsFromPuzzle(puzzle: string): CellPrediction[] {
   return [...puzzle]
     .map(Number)
@@ -25,5 +37,9 @@ describe("OCR Sudoku reconciliation", () => {
     expect(result.values[1]).toBe(3);
     expect(result.confidence[1]).toBeLessThan(0.5);
   });
-});
 
+  it("keeps the shadowed photographed puzzle while excluding A/B annotations", () => {
+    const result = reconcileWithSudoku(predictionsFromPuzzle(SHADOWED_PHOTO_PUZZLE));
+    expect(result.values.join("")).toBe(SHADOWED_PHOTO_PUZZLE);
+  });
+});
