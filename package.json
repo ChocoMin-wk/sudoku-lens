@@ -1,0 +1,33 @@
+{
+  "name": "sudoku-lens",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build --configLoader runner",
+    "preview": "vite preview",
+    "test": "vitest run --configLoader runner",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@techstark/opencv-js": "^4.11.0-release.1",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "globals": "16.4.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vite": "8.0.13",
+    "vitest": "^3.2.4"
+  }
+}

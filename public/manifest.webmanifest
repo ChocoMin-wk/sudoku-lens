@@ -1,0 +1,12 @@
+{
+  "name": "数独レンズ",
+  "short_name": "数独レンズ",
+  "description": "写真から問題を取り込める、端末内で動く数独アプリ",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f2e8",
+  "theme_color": "#315f57",
+  "orientation": "portrait-primary"
+}
