@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SAMPLE_PUZZLE,
   analyzePuzzle,
+  boardFromDigits,
   boardFromString,
   conflictIndexes,
   noteIsSet,
@@ -30,5 +31,12 @@ describe("sudoku domain", () => {
     const notes = toggleNote(0, 7);
     expect(noteIsSet(notes, 7)).toBe(true);
     expect(noteIsSet(toggleNote(notes, 7), 7)).toBe(false);
+  });
+
+  it("treats imported image digits as fixed givens", () => {
+    const board = boardFromDigits([6, 0, 7]);
+    expect(board[0]).toMatchObject({ given: 6, value: null, notes: 0 });
+    expect(board[1]).toMatchObject({ given: null, value: null, notes: 0 });
+    expect(board[2]).toMatchObject({ given: 7, value: null, notes: 0 });
   });
 });

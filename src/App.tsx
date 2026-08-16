@@ -194,7 +194,6 @@ function ScanDialog({
                 <input
                   type="file"
                   accept="image/*"
-                  capture="environment"
                   onChange={(event) => event.target.files?.[0] && loadFile(event.target.files[0])}
                 />
               </label>
@@ -325,7 +324,11 @@ export default function App() {
   }, [board]);
 
   const enterDigit = useCallback((digit: Digit) => {
-    if (selected === null || board[selected].given) return;
+    if (selected === null) return;
+    if (board[selected].given) {
+      setMessage("初期数字は変更できません");
+      return;
+    }
     const next = cloneBoard(board);
     const cell = next[selected];
     if (noteMode) {
@@ -338,14 +341,23 @@ export default function App() {
   }, [board, commit, noteMode, selected]);
 
   const eraseValue = useCallback(() => {
-    if (selected === null || board[selected].given) return;
+    if (selected === null) return;
+    if (board[selected].given) {
+      setMessage("初期数字は変更できません");
+      return;
+    }
     const next = cloneBoard(board);
     next[selected].value = null;
     commit(next);
   }, [board, commit, selected]);
 
   const clearNotes = useCallback(() => {
-    if (selected === null || board[selected].given || board[selected].notes === 0) return;
+    if (selected === null) return;
+    if (board[selected].given) {
+      setMessage("初期数字にはメモを入力できません");
+      return;
+    }
+    if (board[selected].notes === 0) return;
     const next = cloneBoard(board);
     next[selected].notes = 0;
     commit(next);
@@ -430,6 +442,7 @@ export default function App() {
   };
 
   const selectedValue = selected === null ? 0 : (board[selected].given ?? board[selected].value ?? 0);
+  const selectedIsGiven = selected !== null && Boolean(board[selected].given);
   const selectedPeers = useMemo(() => new Set(selected === null ? [] : peerIndexes(selected)), [selected]);
 
   return (
@@ -483,8 +496,13 @@ export default function App() {
                     className={classes}
                     role="gridcell"
                     aria-selected={isSelected}
-                    aria-label={`${Math.floor(index / 9) + 1}行${(index % 9) + 1}列${value ? `、${value}` : "、空欄"}`}
-                    onClick={() => setSelected(index)}
+                    aria-disabled={Boolean(cell.given)}
+                    aria-label={`${Math.floor(index / 9) + 1}行${(index % 9) + 1}列${value ? `、${value}` : "、空欄"}${cell.given ? "、初期数字、変更不可" : "、入力可能"}`}
+                    title={cell.given ? "初期数字（変更・メモ入力不可）" : "入力できるマス"}
+                    onClick={() => {
+                      setSelected(index);
+                      if (cell.given) setMessage("初期数字は固定されています");
+                    }}
                   >
                     {cell.notes !== 0 && (
                       <span className="notes-grid" aria-hidden="true">
@@ -512,13 +530,19 @@ export default function App() {
 
           <div className="number-pad" aria-label="数字入力">
             {Array.from({ length: 9 }, (_, index) => (index + 1) as Digit).map((digit) => (
-              <button key={digit} onClick={() => enterDigit(digit)}>{digit}</button>
+              <button
+                key={digit}
+                onClick={() => enterDigit(digit)}
+                disabled={selected === null || selectedIsGiven}
+              >
+                {digit}
+              </button>
             ))}
           </div>
 
           <div className="clear-actions">
-            <button className="erase-button" onClick={eraseValue}><span>⌫</span> 数字クリア</button>
-            <button className="erase-button" onClick={clearNotes}><span>×</span> メモクリア</button>
+            <button className="erase-button" onClick={eraseValue} disabled={selected === null || selectedIsGiven}><span>⌫</span> 数字クリア</button>
+            <button className="erase-button" onClick={clearNotes} disabled={selected === null || selectedIsGiven}><span>×</span> メモクリア</button>
           </div>
 
           <div className="history-actions">

@@ -261,6 +261,23 @@ h1 {
   transition: background-color 120ms ease, color 120ms ease;
 }
 
+.sudoku-cell.given {
+  background: #eee9dc;
+  cursor: default;
+}
+
+.sudoku-cell.given::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink);
+  opacity: 0.42;
+}
+
 .sudoku-cell:nth-child(3n):not(:nth-child(9n)) {
   border-right: 2px solid var(--ink);
 }
@@ -315,11 +332,12 @@ h1 {
 
 .sudoku-cell.given .cell-value {
   color: var(--ink);
-  font-weight: 700;
+  font-weight: 850;
 }
 
 .sudoku-cell.editable .cell-value {
   color: var(--green);
+  font-weight: 650;
 }
 
 .notes-grid {
@@ -476,6 +494,18 @@ kbd {
   border-color: var(--green);
   background: var(--mint);
   color: var(--green-dark);
+}
+
+.number-pad button:disabled,
+.erase-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.number-pad button:disabled:hover {
+  border-color: #c8c9c0;
+  background: var(--paper);
+  color: inherit;
 }
 
 .clear-actions {
