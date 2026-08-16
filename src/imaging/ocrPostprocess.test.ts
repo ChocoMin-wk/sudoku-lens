@@ -28,14 +28,14 @@ describe("OCR Sudoku reconciliation", () => {
     expect(result.values.join("")).toBe(SAMPLE_PUZZLE);
   });
 
-  it("repairs a low-confidence conflicting clue from the unique solution", () => {
+  it("removes a conflicting clue without inventing a fixed digit from the solution", () => {
     const predictions = predictionsFromPuzzle(SAMPLE_PUZZLE);
     const changed = predictions.find((prediction) => prediction.index === 1)!;
     changed.candidates = [{ digit: 5, confidence: 0.25 }];
 
     const result = reconcileWithSudoku(predictions);
-    expect(result.values[1]).toBe(3);
-    expect(result.confidence[1]).toBeLessThan(0.5);
+    expect(result.values[1]).toBe(0);
+    expect(result.confidence[1]).toBe(0);
   });
 
   it("keeps the shadowed photographed puzzle while excluding A/B annotations", () => {

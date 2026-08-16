@@ -40,6 +40,9 @@ type GlyphCell = GlyphVariant & {
 
 const BOARD_SIZE = 900;
 const GLYPH_SIZE = 96;
+// False fixed clues are more harmful than omissions because imported clues are
+// locked. Only very strong, clearly separated candidates are auto-populated.
+const MIN_AUTO_CONFIDENCE = 0.72;
 
 function centerSquare(source: HTMLCanvasElement): HTMLCanvasElement {
   const output = document.createElement("canvas");
@@ -201,6 +204,48 @@ function grayscaleOf(canvas: HTMLCanvasElement) {
     );
   }
   return gray;
+}
+
+/**
+ * Removes slow illumination changes before thresholding. A large local mean
+ * represents the paper/background; subtracting it keeps printed strokes while
+ * flattening phone/camera shadows across the board.
+ */
+function normalizeIllumination(
+  gray: Uint8Array,
+  width: number,
+  height: number,
+) {
+  const stride = width + 1;
+  const integral = new Uint32Array((width + 1) * (height + 1));
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      rowSum += gray[y * width + x];
+      integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + rowSum;
+    }
+  }
+
+  const radius = Math.max(24, Math.round(Math.min(width, height) / 28));
+  const output = new Uint8Array(gray.length);
+  for (let y = 0; y < height; y += 1) {
+    const top = Math.max(0, y - radius);
+    const bottom = Math.min(height - 1, y + radius);
+    for (let x = 0; x < width; x += 1) {
+      const left = Math.max(0, x - radius);
+      const right = Math.min(width - 1, x + radius);
+      const sum =
+        integral[(bottom + 1) * stride + right + 1] -
+        integral[top * stride + right + 1] -
+        integral[(bottom + 1) * stride + left] +
+        integral[top * stride + left];
+      const area = (right - left + 1) * (bottom - top + 1);
+      const localBackground = sum / area;
+      const corrected = 238 + (gray[y * width + x] - localBackground) * 1.55;
+      output[y * width + x] = Math.max(0, Math.min(255, Math.round(corrected)));
+    }
+  }
+  return output;
 }
 
 function adaptiveBinary(gray: Uint8Array, width: number, height: number) {
@@ -478,7 +523,7 @@ function adaptiveCellBinary(values: Uint8Array, width: number, height: number) {
 }
 
 function analyzeCellBinary(binary: Uint8Array, width: number, height: number) {
-  const minimumArea = Math.max(10, Math.round(binary.length * 0.002));
+  const minimumArea = Math.max(18, Math.round(binary.length * 0.004));
   const components = connectedComponents(binary, width, height)
     .filter((component) => {
       const componentWidth = component.maxX - component.minX + 1;
@@ -488,10 +533,16 @@ function analyzeCellBinary(binary: Uint8Array, width: number, height: number) {
       const looksLikeVerticalLine =
         componentHeight > height * 0.72 && componentWidth < width * 0.16;
       const coversMostOfCell = component.area > binary.length * 0.42;
+      const touchesCropEdge =
+        component.minX <= 1 ||
+        component.minY <= 1 ||
+        component.maxX >= width - 2 ||
+        component.maxY >= height - 2;
       return (
         !looksLikeHorizontalLine &&
         !looksLikeVerticalLine &&
         !coversMostOfCell &&
+        !touchesCropEdge &&
         component.area >= minimumArea
       );
     })
@@ -512,16 +563,30 @@ function analyzeCellBinary(binary: Uint8Array, width: number, height: number) {
   const centerX = (bounds.minX + bounds.maxX + 1) / 2 / width;
   const centerY = (bounds.minY + bounds.maxY + 1) / 2 / height;
   const centerOffset = Math.hypot(centerX - 0.5, centerY - 0.5);
+  const fillRatio = bounds.area / (contentWidth * contentHeight);
+  const liesInCorner =
+    (centerX < 0.38 || centerX > 0.62) &&
+    (centerY < 0.38 || centerY > 0.62);
   const likelyAnnotation =
-    heightRatio < 0.2 ||
-    (heightRatio < 0.44 && centerOffset > 0.29) ||
-    (heightRatio < 0.34 && widthRatio < 0.34);
+    liesInCorner &&
+    heightRatio < 0.48 &&
+    widthRatio < 0.48;
 
   if (likelyAnnotation) return { kind: "annotation" as const };
-  if (heightRatio < 0.25 || areaRatio < 0.006) return { kind: "blank" as const };
+  const plausibleDigit =
+    heightRatio >= 0.36 &&
+    heightRatio <= 0.86 &&
+    widthRatio >= 0.1 &&
+    widthRatio <= 0.72 &&
+    areaRatio >= 0.012 &&
+    areaRatio <= 0.28 &&
+    fillRatio >= 0.09 &&
+    fillRatio <= 0.72 &&
+    centerOffset <= 0.3;
+  if (!plausibleDigit) return { kind: "blank" as const };
 
   const heightScore = 1 - Math.min(1, Math.abs(heightRatio - 0.62) / 0.5);
-  const centerScore = 1 - Math.min(1, centerOffset / 0.42);
+  const centerScore = 1 - Math.min(1, centerOffset / 0.3);
   const areaScore = 1 - Math.min(1, Math.abs(areaRatio - 0.09) / 0.2);
   const quality = heightScore * 0.42 + centerScore * 0.43 + areaScore * 0.15;
 
@@ -545,8 +610,10 @@ function preprocessCell(
   x1: number,
   y1: number,
 ) {
-  const insetX = Math.max(5, Math.round((x1 - x0) * 0.08));
-  const insetY = Math.max(5, Math.round((y1 - y0) * 0.08));
+  // A generous inset is intentional: after perspective correction all clues
+  // sit near the centre, while residual grid strokes stay at the cell edges.
+  const insetX = Math.max(7, Math.round((x1 - x0) * 0.12));
+  const insetY = Math.max(7, Math.round((y1 - y0) * 0.12));
   const left = x0 + insetX;
   const top = y0 + insetY;
   const width = Math.max(1, x1 - x0 - insetX * 2);
@@ -561,31 +628,51 @@ function preprocessCell(
 
   const otsu = otsuThreshold(crop);
   const binaries = [
-    binaryAtThreshold(crop, Math.min(110, otsu)),
+    binaryAtThreshold(crop, Math.min(150, otsu)),
     binaryAtThreshold(crop, otsu),
     adaptiveCellBinary(crop, width, height),
   ];
   const analyzed = binaries.map((binary) => analyzeCellBinary(binary, width, height));
-  const variants = analyzed
+  const digitVariants = analyzed
     .flatMap((result) => (result.kind === "digit" ? [result.variant] : []))
-    .sort((a, b) => b.quality - a.quality)
-    .slice(0, 3);
+    .sort((a, b) => b.quality - a.quality);
 
-  if (variants.length) {
+  // A single threshold is easily fooled by shadows or print halftones. Require
+  // two independent threshold images to produce the same centred shape.
+  let bestConsensus = 0;
+  for (let leftIndex = 0; leftIndex < digitVariants.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < digitVariants.length; rightIndex += 1) {
+      bestConsensus = Math.max(
+        bestConsensus,
+        glyphSimilarity(
+          glyphInk(digitVariants[leftIndex].canvas),
+          glyphInk(digitVariants[rightIndex].canvas),
+        ),
+      );
+    }
+  }
+
+  if (digitVariants.length >= 2 && bestConsensus >= 0.64) {
+    const variants = digitVariants.slice(0, 3);
+    variants[0].geometryConfidence *= Math.min(1, 0.9 + bestConsensus * 0.1);
     return {
       kind: "digit" as const,
       primary: variants[0],
       alternatives: variants.slice(1),
     };
   }
-  if (analyzed.some((result) => result.kind === "annotation")) {
+  if (analyzed.filter((result) => result.kind === "annotation").length >= 2) {
     return { kind: "annotation" as const };
   }
   return { kind: "blank" as const };
 }
 
 function extractGlyphCells(board: HTMLCanvasElement) {
-  const gray = grayscaleOf(board);
+  const gray = normalizeIllumination(
+    grayscaleOf(board),
+    board.width,
+    board.height,
+  );
   const binary = adaptiveBinary(gray, board.width, board.height);
   const verticalLines = detectGridLines(binary, board.width, board.height, "x");
   const horizontalLines = detectGridLines(binary, board.width, board.height, "y");
@@ -618,7 +705,11 @@ function extractGlyphCells(board: HTMLCanvasElement) {
 }
 
 function createSparseOcrCanvas(board: HTMLCanvasElement) {
-  const gray = grayscaleOf(board);
+  const gray = normalizeIllumination(
+    grayscaleOf(board),
+    board.width,
+    board.height,
+  );
   const binary = adaptiveBinary(gray, board.width, board.height);
   const verticalLines = detectGridLines(binary, board.width, board.height, "x");
   const horizontalLines = detectGridLines(binary, board.width, board.height, "y");
@@ -631,7 +722,7 @@ function createSparseOcrCanvas(board: HTMLCanvasElement) {
   image.data.fill(255);
 
   const nearLine = (coordinate: number, lines: number[]) =>
-    lines.some((line) => Math.abs(coordinate - line) <= 6);
+    lines.some((line) => Math.abs(coordinate - line) <= 10);
   for (let y = 0; y < board.height; y += 1) {
     if (nearLine(y, horizontalLines)) continue;
     for (let x = 0; x < board.width; x += 1) {
@@ -1032,8 +1123,15 @@ export async function recognizeSudoku(
     onProgress(0.9, "同じ紙面の数字と照合しています");
     augmentWithRecognizedGlyphs(glyphs, predictions);
 
-    onProgress(0.96, "数独ルールで認識結果を確認しています");
-    const reconciled = reconcileWithSudoku(predictions);
+    onProgress(0.96, "高信頼度の数字を数独ルールで確認しています");
+    const highPrecisionPredictions = predictions.filter((prediction) => {
+      const [best, second] = prediction.candidates;
+      return (
+        (best?.confidence ?? 0) >= MIN_AUTO_CONFIDENCE &&
+        (!second || best.confidence - second.confidence >= 0.045)
+      );
+    });
+    const reconciled = reconcileWithSudoku(highPrecisionPredictions);
     onProgress(
       1,
       ignoredAnnotations

@@ -30,8 +30,6 @@ export function reconcileWithSudoku(predictions: CellPrediction[]): ReconciledOc
     confidence[prediction.index] = best.confidence;
   }
 
-  const originalValues = [...values];
-  const removed = new Set<number>();
   const byIndex = new Map(predictions.map((prediction) => [prediction.index, prediction]));
 
   while (hasConflicts(values)) {
@@ -54,7 +52,6 @@ export function reconcileWithSudoku(predictions: CellPrediction[]): ReconciledOc
     if (!replaced) {
       values[weakest] = 0;
       confidence[weakest] = 0;
-      removed.add(weakest);
     }
   }
 
@@ -65,37 +62,12 @@ export function reconcileWithSudoku(predictions: CellPrediction[]): ReconciledOc
       .sort((a, b) => confidence[a.index] - confidence[b.index]);
 
     for (const suspect of suspects) {
-      const current = values[suspect.index];
-      for (const alternative of suspect.candidates.slice(1, 3)) {
-        values[suspect.index] = alternative.digit;
-        if (!hasConflicts(values)) {
-          const alternateAnalysis = analyzePuzzle(values);
-          if (alternateAnalysis.solutionCount === 1) {
-            confidence[suspect.index] = Math.min(alternative.confidence, 0.58);
-            return { values, confidence };
-          }
-        }
-      }
-      values[suspect.index] = current;
-    }
-
-    for (const suspect of suspects) {
       values[suspect.index] = 0;
       confidence[suspect.index] = 0;
-      removed.add(suspect.index);
       analysis = analyzePuzzle(values);
       if (analysis.solutionCount > 0) break;
     }
   }
 
-  if (analysis.solutionCount === 1 && analysis.solution) {
-    for (const index of removed) {
-      if (originalValues[index] === 0) continue;
-      values[index] = analysis.solution[index];
-      confidence[index] = 0.45;
-    }
-  }
-
   return { values, confidence };
 }
-

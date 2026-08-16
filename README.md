@@ -8,7 +8,9 @@
 - 行・列・3×3ブロックの重複警告
 - 一意解判定と完成時の検算
 - カメラ撮影または画像ファイルからの問題取り込み
-- OpenCV.jsによる盤面補正とTesseract.jsによる数字認識
+- OpenCV.jsによる盤面・影・罫線補正とTesseract.jsによる数字認識
+- 複数の二値化結果が一致したマスだけを候補にする精度優先方式
+- 低信頼度の候補は初期数字にせず、誤った固定数字の取り込みを抑制
 - OCR結果の確認・手修正
 - 端末内への自動保存、戻す・やり直す
 - PWAとGitHub Pagesへの自動デプロイ
@@ -29,4 +31,3 @@ npm run build
 リポジトリの **Settings → Pages → Source** で **GitHub Actions** を選択してください。
 `main`ブランチへのpushで、`.github/workflows/deploy-pages.yml`から公開されます。
 ViteのベースパスはGitHub Actions上でリポジトリ名から自動設定されます。
-
