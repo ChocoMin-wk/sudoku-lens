@@ -651,6 +651,7 @@ function collectSparsePredictions(
   result: Awaited<ReturnType<Awaited<ReturnType<typeof createWorker>>["recognize"]>>,
   width: number,
   height: number,
+  allowedIndexes: Set<number>,
 ) {
   const predictions: CellPrediction[] = [];
   const words =
@@ -672,8 +673,10 @@ function collectSparsePredictions(
     const centerY = (word.bbox.y0 + word.bbox.y1) / 2;
     const column = Math.max(0, Math.min(8, Math.floor((centerX / width) * 9)));
     const row = Math.max(0, Math.min(8, Math.floor((centerY / height) * 9)));
+    const index = row * 9 + column;
+    if (!allowedIndexes.has(index)) continue;
     predictions.push({
-      index: row * 9 + column,
+      index,
       candidates: [{
         digit,
         confidence: Math.max(0.4, Math.min(0.68, (word.confidence / 100) * 0.72)),
@@ -824,35 +827,61 @@ function glyphSimilarity(left: Float32Array, right: Float32Array) {
   return best;
 }
 
-function inferFromRecognizedGlyphs(
-  unresolved: GlyphCell[],
+function augmentWithRecognizedGlyphs(
   glyphs: GlyphCell[],
   predictions: CellPrediction[],
 ) {
   const glyphByIndex = new Map(glyphs.map((glyph) => [glyph.index, glyph]));
   const templates = predictions
-    .filter((prediction) => prediction.candidates[0]?.confidence >= 0.45)
-    .map((prediction) => ({
-      digit: prediction.candidates[0].digit,
-      ink: glyphInk(glyphByIndex.get(prediction.index)?.canvas ?? document.createElement("canvas")),
-    }))
-    .filter((template) => template.ink.length);
+    .filter((prediction) => prediction.candidates[0]?.confidence >= 0.58)
+    .flatMap((prediction) => {
+      const glyph = glyphByIndex.get(prediction.index);
+      if (!glyph) return [];
+      return [{
+        index: prediction.index,
+        digit: prediction.candidates[0].digit,
+        inks: [glyph, ...glyph.alternatives].map((variant) => glyphInk(variant.canvas)),
+      }];
+    });
 
-  for (const glyph of unresolved) {
-    const target = glyphInk(glyph.canvas);
+  const additions: CellPrediction[] = [];
+  for (const glyph of glyphs) {
+    const targets = [glyph, ...glyph.alternatives]
+      .map((variant) => glyphInk(variant.canvas));
     const scores = new Map<number, number>();
     for (const template of templates) {
-      const similarity = glyphSimilarity(target, template.ink);
-      scores.set(template.digit, Math.max(scores.get(template.digit) ?? 0, similarity));
+      // Do not let a dubious OCR result reinforce itself.
+      if (template.index === glyph.index) continue;
+      let bestSimilarity = 0;
+      for (const target of targets) {
+        for (const templateInk of template.inks) {
+          bestSimilarity = Math.max(
+            bestSimilarity,
+            glyphSimilarity(target, templateInk),
+          );
+        }
+      }
+      scores.set(
+        template.digit,
+        Math.max(scores.get(template.digit) ?? 0, bestSimilarity),
+      );
     }
-    const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
-    const [best, second] = ranked;
-    if (!best || best[1] < 0.78 || best[1] - (second?.[1] ?? 0) < 0.035) continue;
-    predictions.push({
+
+    const candidates = [...scores.entries()]
+      .filter(([, similarity]) => similarity >= 0.76)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 3)
+      .map(([digit, similarity]) => ({
+        digit,
+        confidence: Math.min(0.72, similarity * 0.78),
+      }));
+    if (!candidates.length) continue;
+    additions.push({
       index: glyph.index,
-      candidates: [{ digit: best[0], confidence: Math.min(0.58, best[1] * 0.65) }],
+      candidates,
     });
   }
+  mergePredictions(predictions, additions);
 }
 
 export async function recognizeSudoku(
@@ -899,57 +928,72 @@ export async function recognizeSudoku(
   );
 
   const predictions: CellPrediction[] = [];
-  const unresolvedGlyphs: GlyphCell[] = [];
   try {
+    // A single board-wide pass is much faster than running several Tesseract
+    // variants for every occupied cell. It also gives us strong exemplars from
+    // the same printed page for the template comparison below.
     await worker.setParameters({
-      tessedit_char_whitelist: "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-      tessedit_pageseg_mode: PSM.SINGLE_CHAR,
+      tessedit_char_whitelist: "123456789",
+      tessedit_pageseg_mode: PSM.SPARSE_TEXT,
       user_defined_dpi: "300",
     });
     recognizingCells = true;
+    onProgress(0.27, "盤面全体から数字を読み取っています");
+    const sparseCanvas = createSparseOcrCanvas(normalized);
+    const sparseResult = await worker.recognize(
+      sparseCanvas,
+      {},
+      { blocks: true, text: true },
+    );
+    const allowedIndexes = new Set(glyphs.map((glyph) => glyph.index));
+    mergePredictions(
+      predictions,
+      collectSparsePredictions(
+        sparseResult,
+        sparseCanvas.width,
+        sparseCanvas.height,
+        allowedIndexes,
+      ),
+    );
 
-    for (let position = 0; position < glyphs.length; position += 1) {
-      const glyph = glyphs[position];
+    await worker.setParameters({
+      tessedit_char_whitelist: "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+      tessedit_pageseg_mode: PSM.SINGLE_CHAR,
+    });
+
+    const strongSparseIndexes = new Set(
+      predictions
+        .filter((prediction) => (prediction.candidates[0]?.confidence ?? 0) >= 0.58)
+        .map((prediction) => prediction.index),
+    );
+    const glyphsToInspect = glyphs.filter(
+      (glyph) => !strongSparseIndexes.has(glyph.index),
+    );
+    const unresolvedGlyphs: GlyphCell[] = [];
+
+    for (let position = 0; position < glyphsToInspect.length; position += 1) {
+      const glyph = glyphsToInspect[position];
       onProgress(
-        0.26 + (position / glyphs.length) * 0.52,
-        `${position + 1} / ${glyphs.length} マスを個別認識しています`,
+        0.34 + (position / Math.max(1, glyphsToInspect.length)) * 0.38,
+        `${position + 1} / ${glyphsToInspect.length} マスを個別確認しています`,
       );
       const result = await worker.recognize(
         glyph.canvas,
         {},
         { blocks: true, text: true },
       );
-      let reading = collectCandidates(result, glyph);
-      if (!reading.annotation && (reading.candidates[0]?.confidence ?? 0) < 0.72) {
-        for (const alternative of glyph.alternatives) {
-          const alternativeResult = await worker.recognize(
-            alternative.canvas,
-            {},
-            { blocks: true, text: true },
-          );
-          const alternativeReading = collectCandidates(alternativeResult, alternative);
-          reading = {
-            annotation: reading.annotation && alternativeReading.annotation,
-            candidates: mergeCandidates(
-              reading.candidates,
-              alternativeReading.candidates.map((candidate) => ({
-                ...candidate,
-                confidence: candidate.confidence * 0.96,
-              })),
-            ),
-          };
-          if ((reading.candidates[0]?.confidence ?? 0) >= 0.72) break;
-        }
-      }
+      const reading = collectCandidates(result, glyph);
       if (reading.annotation) ignoredAnnotations += 1;
       if (reading.candidates.length) {
-        predictions.push({ index: glyph.index, candidates: reading.candidates });
+        mergePredictions(predictions, [{
+          index: glyph.index,
+          candidates: reading.candidates,
+        }]);
       } else if (!reading.annotation) {
         unresolvedGlyphs.push(glyph);
       }
     }
 
-    const stillUnresolved: GlyphCell[] = [];
     if (unresolvedGlyphs.length) {
       // A mixed digit/letter whitelist can make Tesseract return nothing for
       // heavy typefaces (for example 8≈B and 6≈G). A digits-only retry recovers
@@ -961,7 +1005,7 @@ export async function recognizeSudoku(
       for (let position = 0; position < unresolvedGlyphs.length; position += 1) {
         const glyph = unresolvedGlyphs[position];
         onProgress(
-          0.8 + (position / unresolvedGlyphs.length) * 0.14,
+          0.74 + (position / unresolvedGlyphs.length) * 0.14,
           `${position + 1} / ${unresolvedGlyphs.length} マスを数字専用で再確認しています`,
         );
         const retryResult = await worker.recognize(
@@ -969,61 +1013,26 @@ export async function recognizeSudoku(
           {},
           { blocks: true, text: true },
         );
-        let retryReading = collectCandidates(retryResult, glyph);
-        for (const alternative of glyph.alternatives) {
-          if ((retryReading.candidates[0]?.confidence ?? 0) >= 0.62) break;
-          const alternativeResult = await worker.recognize(
-            alternative.canvas,
-            {},
-            { blocks: true, text: true },
-          );
-          const alternativeReading = collectCandidates(alternativeResult, alternative);
-          retryReading = {
-            annotation: false,
-            candidates: mergeCandidates(
-              retryReading.candidates,
-              alternativeReading.candidates.map((candidate) => ({
-                ...candidate,
-                confidence: candidate.confidence * 0.94,
-              })),
-            ),
-          };
-        }
+        const retryReading = collectCandidates(retryResult, glyph);
         if (retryReading.candidates.length) {
-          predictions.push({
+          mergePredictions(predictions, [{
             index: glyph.index,
             candidates: retryReading.candidates.map((candidate) => ({
               ...candidate,
               confidence: candidate.confidence * 0.82,
             })),
-          });
-        } else {
-          stillUnresolved.push(glyph);
+          }]);
         }
       }
     }
 
-    if (stillUnresolved.length) {
-      inferFromRecognizedGlyphs(stillUnresolved, glyphs, predictions);
-    }
+    // Alternative threshold images are compared in-memory with trusted digits
+    // from this exact page. This recovers shadowed 2/7/8 clues without another
+    // expensive OCR request for every variant.
+    onProgress(0.9, "同じ紙面の数字と照合しています");
+    augmentWithRecognizedGlyphs(glyphs, predictions);
 
-    onProgress(0.94, "盤面全体から数字を再確認しています");
-    await worker.setParameters({
-      tessedit_char_whitelist: "123456789",
-      tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-    });
-    const sparseCanvas = createSparseOcrCanvas(normalized);
-    const sparseResult = await worker.recognize(
-      sparseCanvas,
-      {},
-      { blocks: true, text: true },
-    );
-    mergePredictions(
-      predictions,
-      collectSparsePredictions(sparseResult, sparseCanvas.width, sparseCanvas.height),
-    );
-
-    onProgress(0.97, "数独ルールで認識結果を確認しています");
+    onProgress(0.96, "数独ルールで認識結果を確認しています");
     const reconciled = reconcileWithSudoku(predictions);
     onProgress(
       1,
